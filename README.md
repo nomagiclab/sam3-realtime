@@ -1,4 +1,8 @@
-## Run the server
+The server works in a real-time fashion.
+It takes one image at a time and outputs a mask (and a few other things).
+It is stateful, so it uses previous masks to make a prediciton.
+
+## Run the server:
 ```bash
 uv run demo/server.py
 ```

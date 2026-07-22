@@ -16,7 +16,8 @@ from sam3.model.act_ckpt_utils import clone_output_wrapper
 from sam3.model.box_ops import box_xywh_to_cxcywh, box_xyxy_to_xywh
 from sam3.model.data_misc import BatchedDatapoint, FindStage, convert_my_tensors
 from sam3.model.geometry_encoders import Prompt
-from sam3.model.sam3_video_base import MaskletConfirmationStatus, Sam3VideoBase
+from sam3.model.sam3_video_base import MaskletConfirmationStatus
+from sam3.model.sam3_video_inference import Sam3VideoInferenceWithInstanceInteractivity
 from sam3.model.utils.misc import copy_data_to_device
 from sam3.perflib.compile import compile_wrapper, shape_logging_wrapper
 from sam3.perflib.masks_ops import masks_to_boxes as perf_masks_to_boxes
@@ -24,7 +25,7 @@ from sam3.perflib.masks_ops import masks_to_boxes as perf_masks_to_boxes
 logger = get_logger(__name__)
 
 
-class Sam3StreamInference(Sam3VideoBase):
+class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
     """Real-time streaming inference for SAM3.
 
     Frames are pushed incrementally; per-frame inference runs immediately without
@@ -227,6 +228,12 @@ class Sam3StreamInference(Sam3VideoBase):
                     trk_state["video_height"] = inference_state["orig_height"]
                     trk_state["video_width"] = inference_state["orig_width"]
 
+        # To fix the memory leak release the pixels of frames we have already moved past 
+        if isinstance(input_batch.img_batch, list):
+            drop_idx = inference_state["curr_frame_idx"] - 2
+            if drop_idx >= 0:
+                input_batch.img_batch[drop_idx] = None
+
         return inference_state["curr_frame_idx"]
 
     def _get_visual_prompt(self, inference_state, frame_idx, boxes_cxcywh, box_labels):
@@ -264,9 +271,31 @@ class Sam3StreamInference(Sam3VideoBase):
         text_str: Optional[str] = None,
         boxes_xywh: Optional[torch.Tensor] = None,
         box_labels: Optional[torch.Tensor] = None,
+        points: Optional[torch.Tensor] = None,
+        point_labels: Optional[torch.Tensor] = None,
+        obj_id: Optional[int] = None,
+        rel_coordinates: bool = True,
     ):
         assert inference_state.get("input_batch") is not None, "No frames added yet. Call add_frame first."
         assert 0 <= frame_idx <= inference_state["curr_frame_idx"], "frame_idx must exist"
+
+        assert (points is not None) == (point_labels is not None), "points and point_labels must be provided together"
+        if points is not None:
+            assert (
+                text_str is None and boxes_xywh is None and box_labels is None
+            ), "Point prompts cannot be combined with text or box prompts."
+            assert obj_id is not None, "Point prompts require obj_id."
+
+            inference_state["cached_frame_outputs"].setdefault(frame_idx, {})
+            return self.add_tracker_new_points(
+                inference_state,
+                frame_idx,
+                obj_id=obj_id,
+                points=points,
+                labels=point_labels,
+                rel_coordinates=rel_coordinates,
+                use_prev_mem_frame=self.use_prev_mem_frame,
+            )
 
         if text_str is not None and text_str != "visual":
             inference_state["text_prompt"] = text_str

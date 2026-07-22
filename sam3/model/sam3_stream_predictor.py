@@ -23,7 +23,9 @@ class Sam3StreamPredictor:
       - {"type": "start_session", "session_id": Optional[str]}
       - {"type": "add_frame", "session_id": str, "frame": raw_image}
       - {"type": "add_prompt", "session_id": str, "frame_index": int, "text": Optional[str],
-         "bounding_boxes": Optional[List[List[float]]], "bounding_box_labels": Optional[List[int]]}
+         "points": Optional[List[List[float]]], "point_labels": Optional[List[int]],
+         "bounding_boxes": Optional[List[List[float]]], "bounding_box_labels": Optional[List[int]],
+         "obj_id": Optional[int], "rel_coordinates": Optional[bool]}
       - {"type": "run_inference", "session_id": str, "frame_index": Optional[int]}
       - {"type": "get_cached_output", "session_id": str, "frame_index": int}
       - {"type": "reset_session", "session_id": str}
@@ -81,8 +83,12 @@ class Sam3StreamPredictor:
                 session_id=request["session_id"],
                 frame_idx=request["frame_index"],
                 text=request.get("text"),
+                points=request.get("points"),
+                point_labels=request.get("point_labels"),
                 bounding_boxes=request.get("bounding_boxes"),
                 bounding_box_labels=request.get("bounding_box_labels"),
+                obj_id=request.get("obj_id"),
+                rel_coordinates=request.get("rel_coordinates", True),
             )
         elif request_type == "run_inference":
             return self.run_inference(
@@ -130,22 +136,32 @@ class Sam3StreamPredictor:
         session_id: str,
         frame_idx: int,
         text: Optional[str] = None,
+        points: Optional[list] = None,
+        point_labels: Optional[list] = None,
         bounding_boxes: Optional[list] = None,
         bounding_box_labels: Optional[list] = None,
+        obj_id: Optional[int] = None,
+        rel_coordinates: bool = True,
     ):
         session = self._get_session(session_id)
         inference_state = session["state"]
 
         logger.debug(
             f"add prompt on frame {frame_idx} in session {session_id}: "
-            f"text={text}, boxes={bounding_boxes}, box_labels={bounding_box_labels}"
+            f"text={text}, points={points}, point_labels={point_labels}, "
+            f"boxes={bounding_boxes}, box_labels={bounding_box_labels}, "
+            f"obj_id={obj_id}, rel_coordinates={rel_coordinates}"
         )
         frame_idx, outputs = self.model.add_prompt(
             inference_state=inference_state,
             frame_idx=frame_idx,
             text_str=text,
+            points=points,
+            point_labels=point_labels,
             boxes_xywh=bounding_boxes,
             box_labels=bounding_box_labels,
+            obj_id=obj_id,
+            rel_coordinates=rel_coordinates,
         )
         return {"frame_index": frame_idx, "outputs": outputs}
 

@@ -226,6 +226,7 @@ class Sam3VideoBase(nn.Module):
                 tracker_metadata_prev=tracker_metadata_prev,
                 tracker_states_local=tracker_states_local,
                 is_image_only=is_image_only,
+                allow_new_detections=allow_new_detections,
             )
         )
 
@@ -513,6 +514,7 @@ class Sam3VideoBase(nn.Module):
         tracker_metadata_prev: Dict[str, npt.NDArray],
         tracker_states_local: List[Any],
         is_image_only: bool = False,
+        allow_new_detections: bool = True,
     ):
         # initialize new metadata from previous metadata (its values will be updated later)
         tracker_metadata_new = {
@@ -595,6 +597,7 @@ class Sam3VideoBase(nn.Module):
                     unmatched_trk_obj_ids=unmatched_trk_obj_ids,
                     rank0_metadata=rank0_metadata_new,
                     tracker_metadata=tracker_metadata_prev,
+                    allow_new_detections=allow_new_detections,
                 )
             else:
                 # if warm-up is not complete, we don't remove any objects
@@ -1319,8 +1322,11 @@ class Sam3VideoBase(nn.Module):
         unmatched_trk_obj_ids: npt.NDArray,
         rank0_metadata: Dict[str, Any],
         tracker_metadata: Dict[str, Any],
+        allow_new_detections: bool = True,
     ):
-        """Handle hotstart heuristics to remove unmatched or duplicated objects."""
+        if not allow_new_detections:
+            return set(), rank0_metadata
+
         # obj_id --> first frame index where the object was detected
         obj_first_frame_idx = rank0_metadata["obj_first_frame_idx"]
         # obj_id --> [mismatched frame indices]

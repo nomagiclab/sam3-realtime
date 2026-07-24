@@ -43,3 +43,6 @@ just tracked:
     Input:  nothing.
     Output: {"ok": true}.
 ```
+
+# Model weights: 
+if you don't have access to the gated facebook/sam3 repo on Hugging Face paste the weights `~/.cache/huggingface/hub/`. (maybe setup HF_HUB_OFFLINE=1)

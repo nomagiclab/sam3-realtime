@@ -24,12 +24,24 @@ app = FastAPI(title="SAM3 server")
 
 # Gemini (Vertex AI) client for /detect_with_model. Uses the credentials from
 # `gcloud auth login` / `gcloud auth application-default login`, no API key needed.
+# Built lazily so that people without Gemini access can still use every other
+# endpoint; only hitting /detect_with_model requires it to succeed.
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-GEMINI_CLIENT = genai.Client(
-    vertexai=True,
-    project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
-    location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
-)
+_GEMINI_CLIENT = None
+
+
+def get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        try:
+            _GEMINI_CLIENT = genai.Client(
+                vertexai=True,
+                project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Gemini client unavailable: {e}")
+    return _GEMINI_CLIENT
 
 # Hardcoded task: point at the item sticking out of its box. Gemini's spatial
 # convention is [y, x] normalized to 0..1000.
@@ -45,7 +57,10 @@ DETECT_PROMPT = (
     "2. Completely ignore all background containers, other crates, and background items. "
     "3. Ignore the robot arm, its tools, and items on the distant floor. "
     ""
-    "Point at the part of the item in the primary crate that sticks out."
+    "Note: Be aware that the protruding item may have limited visibility. Pay special "
+    "attention to the front wall of the crate (closest to the camera) where perspective "
+    "makes it hard to see, and look carefully if the item is partially occluded by the robot's tool. "
+    ""
 )
 DETECT_SCHEMA = {
     "type": "object",
@@ -150,7 +165,7 @@ def detect_with_model(body: dict):
     ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     image_part = types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg")
 
-    response = GEMINI_CLIENT.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=GEMINI_MODEL,
         contents=[DETECT_PROMPT, image_part],
         config=types.GenerateContentConfig(

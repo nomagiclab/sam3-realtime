@@ -1,0 +1,26 @@
+services:
+  sam3-server:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your host HF cache (with the sam3 weights already placed in it,
+      # see README.md "Model weights") into the container's cache dir.
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+      # Application Default Credentials from `gcloud auth application-default login`,
+      # needed for the /detect_with_model (Gemini) endpoint.
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro
+    environment:
+      - HF_HUB_OFFLINE=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+      # Only needed for the /detect_with_model (Gemini) endpoint.
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-global}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

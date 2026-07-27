@@ -24,7 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+    "pyarrow>=25.0.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/facebookresearch/sam3"

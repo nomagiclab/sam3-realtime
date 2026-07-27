@@ -1,0 +1,13 @@
+.git
+.venv
+data/
+sam3_logs/
+*.egg-info
+__pycache__/
+*.pyc
+examples/
+scripts/
+.pytest_cache/
+.mypy_cache/
+README_ORIGINAL.md
+README_TRAIN.md

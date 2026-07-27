@@ -46,3 +46,17 @@ just tracked:
 
 # Model weights: 
 if you don't have access to the gated facebook/sam3 repo on Hugging Face paste the weights `~/.cache/huggingface/hub/`. (maybe setup HF_HUB_OFFLINE=1)
+
+## Run the server in Docker
+Needs a GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+
+1. Get the weights into your host's HF cache as described above (`~/.cache/huggingface/hub/`) — the
+   container mounts that same directory, it doesn't ship the weights itself.
+2. Build and run:
+   ```bash
+   docker compose up --build
+   ```
+3. The server is now reachable at `http://localhost:8000`.
+
+The `/detect_with_model` endpoint (Gemini) is optional and needs `GOOGLE_CLOUD_PROJECT` set (and
+`gcloud auth application-default login` credentials mounted/available) — skip it if you don't use that endpoint.

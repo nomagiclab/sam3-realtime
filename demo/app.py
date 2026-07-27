@@ -191,18 +191,38 @@ class H264Writer:
             self.container.close()
 
 
+def mark_point(frame: np.ndarray, x: int, y: int) -> np.ndarray:
+    """Draw the little point marker used everywhere a point is picked."""
+    marked = frame.copy()
+    h, w = frame.shape[:2]
+    r = max(5, round(min(w, h) / 80))
+    cv2.circle(marked, (x, y), r + 2, (0, 0, 0), -1)
+    cv2.circle(marked, (x, y), r, (255, 235, 59), -1)
+    cv2.circle(marked, (x, y), r, (255, 255, 255), 2)
+    return marked
+
+
 def pick_point(original, evt: gr.SelectData):
     """Click on the first frame -> store a normalized [x,y] point and mark it."""
     if original is None:
         raise gr.Error("Upload a video first.")
     x, y = int(evt.index[0]), int(evt.index[1])
     h, w = original.shape[:2]
-    marked = original.copy()
-    r = max(5, round(min(w, h) / 80))
-    cv2.circle(marked, (x, y), r + 2, (0, 0, 0), -1)
-    cv2.circle(marked, (x, y), r, (255, 235, 59), -1)
-    cv2.circle(marked, (x, y), r, (255, 255, 255), 2)
-    return marked, [x / w, y / h]
+    return mark_point(original, x, y), [x / w, y / h]
+
+
+def detect_point(original):
+    """"Detect with Gemini" button -> ask the server's /detect_with_model
+    endpoint to point at the object, mark it, and switch the prompt type to Point."""
+    if original is None:
+        raise gr.Error("Upload a video first.")
+    r = requests.post(f"{SERVER}/detect_with_model",
+                       json={"image": rgb_to_b64(original)}, timeout=60)
+    r.raise_for_status()
+    x_norm, y_norm = r.json()["point"]
+    h, w = original.shape[:2]
+    x, y = round(x_norm * w), round(y_norm * h)
+    return mark_point(original, x, y), [x_norm, y_norm], "Point"
 
 
 def run_video(video_path, mode, prompt, point, target_fps, progress=gr.Progress()):
@@ -284,6 +304,7 @@ with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
                 vid_mode = gr.Radio(["Text", "Point"], value="Text", label="Prompt type")
                 vid_prompt = gr.Textbox(label="Text prompt")
                 vid_fps = gr.Slider(1, 30, value=6, step=1, label="Target FPS")
+                vid_detect_btn = gr.Button("Detect protruding object (Gemini)")
                 with gr.Row():
                     vid_btn = gr.Button("Run", variant="primary")
                     vid_stop = gr.Button("Stop")
@@ -294,6 +315,7 @@ with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
                 vid_masks = gr.Video(label="Masks")
         vid_in.change(show_first_frame, vid_in, [vid_preview, vid_frame0])
         vid_preview.select(pick_point, vid_frame0, [vid_preview, vid_point])
+        vid_detect_btn.click(detect_point, vid_frame0, [vid_preview, vid_point, vid_mode])
         run_event = vid_btn.click(run_video, [vid_in, vid_mode, vid_prompt, vid_point, vid_fps],
                                   [vid_out, vid_masks])
         vid_stop.click(None, None, None, cancels=[run_event])  # takes effect within one frame

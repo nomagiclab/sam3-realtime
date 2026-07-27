@@ -1,4 +1,6 @@
 import base64
+import json
+import os
 import threading
 
 import cv2
@@ -6,6 +8,8 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from google import genai
+from google.genai import types
 
 from sam3.model_builder import build_sam3_stream_predictor
 
@@ -17,6 +21,39 @@ PREDICTOR = build_sam3_stream_predictor(device=DEVICE)
 LOCK = threading.Lock()
 
 app = FastAPI(title="SAM3 server")
+
+# Gemini (Vertex AI) client for /detect_with_model. Uses the credentials from
+# `gcloud auth login` / `gcloud auth application-default login`, no API key needed.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_CLIENT = genai.Client(
+    vertexai=True,
+    project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+    location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
+)
+
+# Hardcoded task: point at the item sticking out of its box. Gemini's spatial
+# convention is [y, x] normalized to 0..1000.
+DETECT_PROMPT = (
+    "Your primary goal is to identify the single, main crate located in "
+    "the foreground of the image, directly underneath the robot's tool. "
+    ""
+    "Within *only* that specific crate, find the one item that sticks out / "
+    "protrudes beyond the top edge of that crate. "
+    ""
+    "Strictly follow these rules: "
+    "1. Focus *only* on the items within or on the edge of the one main foreground crate. "
+    "2. Completely ignore all background containers, other crates, and background items. "
+    "3. Ignore the robot arm, its tools, and items on the distant floor. "
+    ""
+    "Point at the part of the item in the primary crate that sticks out."
+)
+DETECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "point": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+    },
+    "required": ["point"],
+}
 
 
 ################## Helpers ##################
@@ -100,6 +137,33 @@ def predict(session_id: str, body: dict):
         })
 
     return {"frame_index": idx, "objects": objects}
+
+
+@app.post("/detect_with_model")
+def detect_with_model(body: dict):
+    """Ask Gemini to point at the item sticking out of the box (task is hardcoded).
+
+    Body:   {"image": <b64 jpeg/png>}
+    Output: {"point": [x, y]}  normalized 0..1, same convention as /predict's "point"
+    """
+    frame = b64_to_rgb(body["image"])
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    image_part = types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg")
+
+    response = GEMINI_CLIENT.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[DETECT_PROMPT, image_part],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=DETECT_SCHEMA,
+        ),
+    )
+    try:
+        y1000, x1000 = json.loads(response.text)["point"]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"Gemini returned no usable point: {e}")
+
+    return {"point": [x1000 / 1000, y1000 / 1000]}
 
 
 @app.post("/sessions/{session_id}/reset")

@@ -161,3 +161,6 @@ outputs/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+data/
+deta/

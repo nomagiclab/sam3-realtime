@@ -54,6 +54,7 @@ demo = [
     "fastapi",
     "uvicorn",
     "requests",
+    "google-genai",
 ]
 
 [tool.uv]

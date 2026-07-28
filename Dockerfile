@@ -28,6 +28,6 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # already in place (see README.md "Model weights").
 ENV HF_HOME=/root/.cache/huggingface
 
-EXPOSE 8000
+EXPOSE 8006
 
 CMD ["uv", "run", "demo/server.py"]

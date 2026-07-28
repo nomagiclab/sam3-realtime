@@ -2,7 +2,7 @@ services:
   sam3-server:
     build: .
     ports:
-      - "8000:8000"
+      - "8006:8006"
     volumes:
       - ${HF_HOME:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
     environment:

@@ -56,4 +56,4 @@ Needs a GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/clou
    ```bash
    docker compose up --build
    ```
-3. The server is now reachable at `http://localhost:8000`.
+3. The server is now reachable at `http://localhost:8006`.

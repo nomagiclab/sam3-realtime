@@ -28,7 +28,7 @@ import requests
 
 from sam3.visualization_utils import COLORS, render_masklet_frame
 
-SERVER = os.environ.get("SAM3_SERVER", "http://localhost:8000")
+SERVER = os.environ.get("SAM3_SERVER", "http://localhost:8006")
 
 
 # --- Tiny HTTP client for the server -----------------------------------------

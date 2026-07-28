@@ -43,3 +43,14 @@ just tracked:
     Input:  nothing.
     Output: {"ok": true}.
 ```
+
+## Run the server in Docker
+Needs a GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+
+1. Get the weights into your host's HF cache as described above (`~/.cache/huggingface/hub/`) — the
+   container mounts that same directory, it doesn't ship the weights itself.
+2. Build and run:
+   ```bash
+   docker compose up --build
+   ```
+3. The server is now reachable at `http://localhost:8000`.

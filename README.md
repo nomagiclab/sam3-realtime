@@ -44,6 +44,9 @@ just tracked:
     Output: {"ok": true}.
 ```
 
+## Model weights
+Download model weights and put them into `~/.cache/huggingface/hub/`
+
 ## Run the server in Docker
 Needs a GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
 

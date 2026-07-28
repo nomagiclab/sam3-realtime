@@ -42,4 +42,15 @@ just tracked:
     Does:   closes the session and frees its memory.
     Input:  nothing.
     Output: {"ok": true}.
+
+  POST /gemini
+    Does:   generic Gemini call; the caller supplies the prompt, JSON schema, and
+            image(s) -- the server has no hardcoded task. Needs Gemini/Vertex AI
+            credentials (`gcloud auth application-default login`) and
+            GOOGLE_CLOUD_PROJECT set.
+    Input:  {"images": [<b64 jpeg/png>, ...], "prompt": "...", "schema": {<json schema>}}.
+    Output: {"result": <parsed JSON matching schema>}.
 ```
+
+See `scripts/apply_masks_lerobot.py` for an example caller: it defines its own
+prompt/schema to point at an object and calls `/gemini` with a single image.

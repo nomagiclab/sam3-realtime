@@ -1,4 +1,6 @@
 import base64
+import json
+import os
 import threading
 
 import cv2
@@ -6,6 +8,8 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from google import genai
+from google.genai import types
 
 from sam3.model_builder import build_sam3_stream_predictor
 
@@ -68,6 +72,53 @@ def infer_frame(session_id: str, frame: np.ndarray, prompt=None, point=None):
 
 
 ################## Endpoints ##################
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+_GEMINI_CLIENT = None
+
+
+def get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        try:
+            _GEMINI_CLIENT = genai.Client(
+                vertexai=True,
+                project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+                location=os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Gemini client unavailable: {e}")
+    return _GEMINI_CLIENT
+
+
+@app.post("/gemini")
+def gemini(body: dict):
+    """Generic Gemini call — the caller supplies the prompt, the JSON schema, and one or more images.
+
+    Body:   {"images": [<b64 jpeg/png>, ...], "prompt": str, "schema": <json schema dict>}
+    Output: {"result": <parsed JSON matching schema>}
+    """
+    image_parts = []
+    for image in body["images"]:
+        frame = b64_to_rgb(image)
+        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        image_parts.append(types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"))
+
+    response = get_gemini_client().models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[body["prompt"], *image_parts],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=body["schema"],
+        ),
+    )
+    try:
+        result = json.loads(response.text)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Gemini returned invalid JSON: {e}")
+
+    return {"result": result}
+
+
 @app.post("/sessions")
 def open_session():
     with LOCK:

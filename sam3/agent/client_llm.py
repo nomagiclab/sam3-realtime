@@ -42,7 +42,7 @@ def send_generate_request(
     Sends a request to the OpenAI-compatible API endpoint using the OpenAI client library.
 
     Args:
-        server_url (str): The base URL of the server, e.g. "http://127.0.0.1:8000"
+        server_url (str): The base URL of the server, e.g. "http://127.0.0.1:8006"
         messages (list): A list of message dicts, each containing role and content.
         model (str): The model to use for generation (default: "llama-4")
         max_tokens (int): Maximum number of tokens to generate (default: 4096)

@@ -26,8 +26,6 @@ import gradio as gr
 import numpy as np
 import requests
 
-from sam3.visualization_utils import COLORS, render_masklet_frame
-
 SERVER = os.environ.get("SAM3_SERVER", "http://localhost:8006")
 
 
@@ -38,10 +36,10 @@ def rgb_to_b64(arr: np.ndarray) -> str:
     return base64.b64encode(buf).decode()
 
 
-def b64_to_mask(data: str) -> np.ndarray:
-    """base64 png from the server -> (H, W) bool mask."""
+def b64_to_rgb(data: str) -> np.ndarray:
+    """base64 image from the server -> (H, W, 3) uint8 rgb array."""
     raw = np.frombuffer(base64.b64decode(data), np.uint8)
-    return cv2.imdecode(raw, cv2.IMREAD_GRAYSCALE) > 127
+    return cv2.cvtColor(cv2.imdecode(raw, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
 
 
 def new_session() -> str:
@@ -58,7 +56,7 @@ def reset_session(session_id: str) -> None:
 
 
 def predict(session_id, rgb, prompt=None, point=None):
-    """Send one frame; get back the server's list of objects (each with a mask)."""
+    """Send one frame; get back the overlay the server rendered (masks painted red)."""
     payload = {"image": rgb_to_b64(rgb)}
     if prompt:
         payload["prompt"] = prompt
@@ -66,35 +64,7 @@ def predict(session_id, rgb, prompt=None, point=None):
         payload["point"] = point
     r = requests.post(f"{SERVER}/sessions/{session_id}/predict", json=payload, timeout=120)
     r.raise_for_status()
-    return r.json()["objects"]
-
-
-# --- Drawing (the server only sends data, so the pictures are made here) -------
-def draw(frame: np.ndarray, objects: list):
-    """Turn one server answer into the two pictures the GUI shows.
-
-    Returns (overlay, masks):
-      overlay - the frame with masks, boxes and labels drawn on top
-      masks   - the bare masks on black, same colour per object as the overlay
-    """
-    masks = np.zeros(frame.shape, np.uint8)
-    if not objects:
-        return frame, masks
-
-    binary_masks = [b64_to_mask(o["mask"]) for o in objects]
-
-    for obj, mask in zip(objects, binary_masks):
-        colour = COLORS[obj["id"] % len(COLORS)] * 255
-        masks[mask] = colour.astype(np.uint8)
-
-    # render_masklet_frame wants the model's arrays back, so rebuild them
-    outputs = {
-        "out_obj_ids": np.array([o["id"] for o in objects]),
-        "out_probs": np.array([o["prob"] for o in objects]),
-        "out_boxes_xywh": np.array([o["box_xywh"] for o in objects], dtype=float),
-        "out_binary_masks": np.array(binary_masks),
-    }
-    return render_masklet_frame(frame, outputs), masks
+    return b64_to_rgb(r.json()["image"])
 
 
 # --- Tab: real-time webcam ----------------------------------------------------
@@ -115,9 +85,9 @@ def request_prompt(prompt, requested):
 
 
 def webcam_step(frame, session_id, requested, applied):
-    """One camera frame -> (overlay, masks). Runs continuously while the camera is on."""
+    """One camera frame -> the overlay. Runs continuously while the camera is on."""
     if frame is None or not requested or not requested[1]:
-        return frame, None, session_id, applied  # no prompt set yet -> just show the camera
+        return frame, session_id, applied  # no prompt set yet -> just show the camera
 
     prompt_to_send = None
     if requested != applied:
@@ -130,8 +100,8 @@ def webcam_step(frame, session_id, requested, applied):
         applied = requested
 
     # after the first frame prompt_to_send is None, so the model just keeps tracking
-    overlay, masks = draw(frame, predict(session_id, frame, prompt=prompt_to_send))
-    return overlay, masks, session_id, applied
+    overlay = predict(session_id, frame, prompt=prompt_to_send)
+    return overlay, session_id, applied
 
 
 # --- Tab 2: whole video file --------------------------------------------------
@@ -236,23 +206,18 @@ def run_video(video_path, mode, prompt, point, target_fps, progress=gr.Progress(
     # only for the progress bar; the count in the file's metadata is an estimate
     total = math.ceil(frame_count / stride) if frame_count > 0 else 0
 
-    # two output videos: the overlay and the bare masks
     overlay_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-    masks_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
     overlay_writer = H264Writer(overlay_path, src_fps / stride)
-    masks_writer = H264Writer(masks_path, src_fps / stride)
 
     session_id = new_session()
     processed = 0
     try:
         for frame in sampled_frames(video_path, stride):
             if processed == 0:
-                objects = predict(session_id, frame, prompt=first_prompt, point=first_point)
+                overlay = predict(session_id, frame, prompt=first_prompt, point=first_point)
             else:
-                objects = predict(session_id, frame)
-            overlay, masks = draw(frame, objects)
+                overlay = predict(session_id, frame)
             overlay_writer.write(overlay)
-            masks_writer.write(masks)
             processed += 1
             if total:
                 total = max(total, processed)  # never show 51/50
@@ -260,11 +225,10 @@ def run_video(video_path, mode, prompt, point, target_fps, progress=gr.Progress(
             else:
                 progress(0.5, desc=str(processed))  # video didn't report a frame count
         overlay_writer.close()
-        masks_writer.close()
     finally:
         # runs on Stop too, so an aborted job doesn't leak a session
         close_session(session_id)
-    return overlay_path, masks_path
+    return overlay_path
 
 
 # --- Build the UI -------------------------------------------------------------
@@ -291,11 +255,10 @@ with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
                 vid_preview = gr.Image(label="First frame — click to set a point",
                                        type="numpy", interactive=False)
                 vid_out = gr.Video(label="Overlay")
-                vid_masks = gr.Video(label="Masks")
         vid_in.change(show_first_frame, vid_in, [vid_preview, vid_frame0])
         vid_preview.select(pick_point, vid_frame0, [vid_preview, vid_point])
         run_event = vid_btn.click(run_video, [vid_in, vid_mode, vid_prompt, vid_point, vid_fps],
-                                  [vid_out, vid_masks])
+                                  vid_out)
         vid_stop.click(None, None, None, cancels=[run_event])  # takes effect within one frame
 
     with gr.Tab("Webcam"):
@@ -305,12 +268,11 @@ with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
         with gr.Row():
             wc_in = gr.Image(sources=["webcam"], streaming=True, type="numpy", label="Camera")
             wc_out = gr.Image(label="Overlay")
-            wc_masks = gr.Image(label="Masks")
         wc_session_id = gr.State(None)
         wc_requested, wc_applied = gr.State(None), gr.State(None)
         wc_set.click(request_prompt, [wc_prompt, wc_requested], wc_requested)
         wc_in.stream(webcam_step, [wc_in, wc_session_id, wc_requested, wc_applied],
-                     [wc_out, wc_masks, wc_session_id, wc_applied])
+                     [wc_out, wc_session_id, wc_applied])
 
 
 if __name__ == "__main__":

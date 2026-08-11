@@ -1,20 +1,3 @@
-"""
-Rebuild a lerobot dataset with the "side" camera masked exactly like the demo
-GUI does: Gemini points at the object in the first frame of each episode,
-then SAM3 tracks and masks it for the rest of the episode. Everything else
-(state/action parquet, other cameras, meta) is copied unchanged, so train and
-eval always see the object masked the same way.
-
-Reuses demo/app.py's own predict()/draw()/H264Writer -- the exact same code
-path the GUI uses -- so this is not a second implementation to keep in sync.
-The Gemini prompt/schema live here, not in the server: the server's /gemini
-endpoint is generic, this script decides what to ask it.
-
-Needs demo/server.py running first (SAM3 + Gemini client).
-
-Usage: python scripts/apply_masks_lerobot.py data/clear/<dataset_name>
-Output: data/masked/<dataset_name>
-"""
 import argparse
 import json
 import shutil
@@ -29,7 +12,7 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from demo.app import SERVER, H264Writer, draw, new_session, close_session, predict, rgb_to_b64  # noqa: E402
+from demo.app import SERVER, H264Writer, new_session, close_session, predict, rgb_to_b64  # noqa: E402
 
 VIDEO_KEY = "observation.images.side"
 
@@ -89,9 +72,7 @@ def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, fps:
                     for i in range(int(ep["length"])):
                         frame = next(frames).to_ndarray(format="rgb24")
                         point = detect_first_point(frame) if i == 0 else None
-                        objects = predict(session_id, frame, point=point)
-                        overlay, _ = draw(frame, objects)
-                        writer.write(overlay)
+                        writer.write(predict(session_id, frame, point=point))
                         bar.update(1)
                 finally:
                     close_session(session_id)
@@ -153,9 +134,7 @@ def test_episode(dataset_dir: str, episode_index: int) -> Path:
         for i in tqdm(range(int(ep["length"])), desc=out_path.name, unit="frame"):
             frame = next(frames).to_ndarray(format="rgb24")
             point = detect_first_point(frame) if i == 0 else None
-            objects = predict(session_id, frame, point=point)
-            overlay, _ = draw(frame, objects)
-            writer.write(overlay)
+            writer.write(predict(session_id, frame, point=point))
     finally:
         close_session(session_id)
         writer.close()

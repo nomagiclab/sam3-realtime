@@ -31,9 +31,15 @@ def b64_to_rgb(data: str) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def mask_to_b64(mask: np.ndarray) -> str:
-    """(H, W) bool mask -> base64 png string"""
-    ok, buf = cv2.imencode(".png", mask.astype(np.uint8) * 255)
+def overlay_to_b64(frame: np.ndarray, masks: np.ndarray) -> str:
+    """(H, W, 3) rgb frame + (N, H, W) bool masks -> base64 jpeg of the frame with
+    every mask painted red at alpha 0.75."""
+    out = frame.copy()
+    if len(masks):
+        any_mask = masks.any(axis=0)
+        out[any_mask] = (0.25 * out[any_mask] + 0.75 * np.array([255, 0, 0])).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(out, cv2.COLOR_RGB2BGR),
+                           [cv2.IMWRITE_JPEG_QUALITY, 85])
     return base64.b64encode(buf).decode()
 
 
@@ -90,22 +96,33 @@ def get_gemini_client():
     return _GEMINI_CLIENT
 
 
+def to_content(role: str, prompt: str, images: list) -> types.Content:
+    """One chat turn: its text, then its images."""
+    parts = [types.Part.from_text(text=prompt)] if prompt else []
+    for image in images or []:
+        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(b64_to_rgb(image), cv2.COLOR_RGB2BGR))
+        parts.append(types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"))
+    return types.Content(role=role, parts=parts)
+
+
 @app.post("/gemini")
 def gemini(body: dict):
     """Generic Gemini call — the caller supplies the prompt, the JSON schema, and one or more images.
 
-    Body:   {"images": [<b64 jpeg/png>, ...], "prompt": str, "schema": <json schema dict>}
+    Earlier turns can be replayed via "history", so a follow-up question can refer to
+    what was asked and answered before ("the item you just pointed at").
+
+    Body:   {"images": [<b64 jpeg/png>, ...], "prompt": str, "schema": <json schema dict>,
+             "history": [{"role": "user" | "model", "prompt": str, "images": [...]}, ...]}
     Output: {"result": <parsed JSON matching schema>}
     """
-    image_parts = []
-    for image in body["images"]:
-        frame = b64_to_rgb(image)
-        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        image_parts.append(types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"))
+    contents = [to_content(turn.get("role", "user"), turn.get("prompt", ""), turn.get("images"))
+                for turn in body.get("history", [])]
+    contents.append(to_content("user", body["prompt"], body.get("images")))
 
     response = get_gemini_client().models.generate_content(
         model=GEMINI_MODEL,
-        contents=[body["prompt"], *image_parts],
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=body["schema"],
@@ -131,11 +148,12 @@ def predict(session_id: str, body: dict):
     Send the prompt with the first frame only, and after that just send frames and
     the model keeps tracking what it already found.
 
-    Returns the raw masks.
+    Returns the frame with the masks painted on it, plus per-object metadata.
 
     Body:   {"image": <b64 jpeg/png>, "prompt": "cat" | null, "point": [x, y] | null}
     Output: {"frame_index": int,
-             "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float, "mask": <b64 png, white = object>}, ...]}
+             "image": <b64 jpeg, masks painted red at alpha 0.75>,
+             "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float}, ...]}
     """
     frame = b64_to_rgb(body["image"])
     idx, out = infer_frame(session_id, frame, prompt=body.get("prompt"), point=body.get("point"))
@@ -147,10 +165,13 @@ def predict(session_id: str, body: dict):
             "id": int(out["out_obj_ids"][i]),
             "box_xywh": [float(v) for v in out["out_boxes_xywh"][i]],
             "prob": float(out["out_probs"][i]),
-            "mask": mask_to_b64(out["out_binary_masks"][i]),
         })
 
-    return {"frame_index": idx, "objects": objects}
+    return {
+        "frame_index": idx,
+        "image": overlay_to_b64(frame, out["out_binary_masks"]),
+        "objects": objects,
+    }
 
 
 @app.post("/sessions/{session_id}/reset")

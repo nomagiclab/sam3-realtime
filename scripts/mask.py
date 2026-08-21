@@ -33,35 +33,39 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from demo.app import H264Writer, close_session, new_session, predict  # noqa: E402
 from find_point_with_gemini import (  # noqa: E402
-    camera_name, episode_offsets, file_columns, load_episodes, video_rel_path,
+    as_points, camera_name, episode_offsets, file_columns, load_episodes, video_rel_path,
 )
 
 
-def track(frames: list, point: list) -> list:
-    """Mask a run of frames in one session, prompting with `point` on the first one.
+def track(frames: list, points: list) -> list:
+    """Mask a run of frames in one session, prompting with `points` on the first one.
     Returns the server's overlays, in the order the frames were given."""
     session_id = new_session()
     try:
-        return [predict(session_id, frame, point=point if i == 0 else None)
+        return [predict(session_id, frame, points=points if i == 0 else None)
                 for i, frame in enumerate(frames)]
     finally:
         close_session(session_id)
 
 
-def mask_episode(frames: list, seed: int, point, bar=None) -> list:
+def mask_episode(frames: list, seed: int, prompt, bar=None) -> list:
     """Mask one episode's frames, seeded at index `seed`. Returns one frame out per
-    frame in -- the frames untouched if `point` is None (item not visible here).
+    frame in -- the frames untouched if there is no prompt (item not visible here).
+
+    `prompt` is whatever the json holds for this camera: one point, or a list of points
+    with labels that the annotator refined the mask with.
 
     The backward half is fed to the model in reverse and flipped back afterwards;
     the seed frame goes through both sessions and the forward copy is the one kept.
     """
-    if point is None:
+    points = as_points(prompt)
+    if not points:
         out = frames
     elif seed == 0:
-        out = track(frames, point)
+        out = track(frames, points)
     else:
-        backward = track(frames[seed::-1], point)         # seed .. 0
-        forward = track(frames[seed:], point)             # seed .. end
+        backward = track(frames[seed::-1], points)        # seed .. 0
+        forward = track(frames[seed:], points)            # seed .. end
         out = backward[:0:-1] + forward                   # drop backward's seed copy
     if bar:
         bar.update(len(out))  # after both halves: the seed frame is masked twice, kept once

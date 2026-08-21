@@ -220,16 +220,32 @@ def collect_frames(dataset_dir: Path, info: dict, episodes: pd.DataFrame, middle
     return frames, seeds
 
 
-def mark(frame: np.ndarray, point) -> np.ndarray:
-    """A copy of the frame with a red dot on the point (nothing drawn if point is None)."""
+def as_points(prompt) -> list:
+    """Whatever the json holds for one camera -> [[x, y, label], ...].
+
+    Gemini and the older files store a single positive [x, y]; hand annotation stores a
+    list of [x, y, label], label 1 to grow the mask and 0 to carve out of it. Reading
+    both here keeps the already-masked datasets loadable.
+    """
+    if not prompt:
+        return []
+    if isinstance(prompt[0], (int, float)):  # a bare [x, y]
+        return [[prompt[0], prompt[1], 1]]
+    return [[p[0], p[1], int(p[2]) if len(p) > 2 else 1] for p in prompt]
+
+
+def mark(frame: np.ndarray, prompt) -> np.ndarray:
+    """A copy of the frame with every point drawn: red adds to the mask, blue carves."""
     out = frame.copy()
-    if point is None:
-        return out
     h, w = out.shape[:2]
-    r = max(4, w // 60)
-    centre = (round(point[0] * w), round(point[1] * h))
-    cv2.circle(out, centre, r, (255, 0, 0), -1)
-    cv2.circle(out, centre, r, (255, 255, 255), 1)
+    # a fixed radius, not one scaled to the frame: the overview camera has both a bigger
+    # frame and a much smaller item in it, so anything proportional buries the item under
+    # its own marker. 4 px is what the wrist views were already drawing.
+    r = 4
+    for x, y, label in as_points(prompt):
+        centre = (round(x * w), round(y * h))
+        cv2.circle(out, centre, r, (255, 0, 0) if label else (0, 128, 255), -1)
+        cv2.circle(out, centre, r, (255, 255, 255), 1)
     return out
 
 
@@ -244,7 +260,8 @@ def save_preview(frames: dict, points: dict, keys: list, path: Path) -> None:
             scale = height / tile.shape[0]
             tile = cv2.resize(tile, (round(tile.shape[1] * scale), height))
         # a camera can be missing from `points` entirely: not answered for yet
-        label = camera_name(key) + ("" if points.get(key) else
+        n = len(as_points(points.get(key)))
+        label = camera_name(key) + (f" ({n} pts)" if n > 1 else "" if n else
                                     " (not visible)" if key in points else " (?)")
         cv2.putText(tile, label, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         tiles.append(tile)

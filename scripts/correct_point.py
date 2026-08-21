@@ -4,7 +4,12 @@ Place and fix the points that scripts/mask.py masks with.
 Pick an episode and you get every camera's view of the same frame. Scrub to a frame
 where the item is clearly visible, then click on it in each view; the click saves that
 camera's point and the frame you are looking at back into the json. Every camera needs
-a point, so scrub until the item is visible in all of them.
+at least one point, so scrub until the item is visible in all of them.
+
+Clicks accumulate, and the toggle above the views decides what a click means: "add"
+grows the mask, "subtract" carves out of it. That is how a mask that only caught part
+of the item -- SAM3 reading a texture edge as the object's edge -- gets fixed: click the
+part it missed, watch the preview grow, carve back anything it over-reached.
 
 Under each view sits what SAM3 actually segmented from that click, so a point that the
 model reads differently than the annotator meant shows up immediately instead of six
@@ -31,8 +36,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from demo.app import close_session, new_session, predict  # noqa: E402
 from find_point_with_gemini import (  # noqa: E402
-    camera_name, episode_offsets, file_columns, load_episodes, mark, save_preview,
-    video_rel_path,
+    as_points, camera_name, episode_offsets, file_columns, load_episodes, mark,
+    save_preview, video_rel_path,
 )
 
 
@@ -80,21 +85,21 @@ def decode(data: bytes) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def sam_preview(frame: np.ndarray, point):
-    """What SAM3 makes of this one point, as the server's red overlay.
+def sam_preview(frame: np.ndarray, points):
+    """What SAM3 makes of these points together, as the server's red overlay.
 
     A throwaway session per call: one frame in, one frame out, nothing to track. The
     server may not be running -- that is not worth interrupting the annotation for, so
     the failure comes back as a message instead of an exception.
     """
-    if point is None:
+    if not points:
         return None, ""
     try:
         session_id = new_session()
     except Exception as e:
         return None, f"  *(no SAM preview: {type(e).__name__} -- is demo/server.py running?)*"
     try:
-        return predict(session_id, frame, point=point), ""
+        return predict(session_id, frame, points=points), ""
     except Exception as e:
         return None, f"  *(SAM preview failed: {type(e).__name__})*"
     finally:
@@ -102,9 +107,9 @@ def sam_preview(frame: np.ndarray, point):
 
 
 def is_complete(state: dict, episode_index: int) -> bool:
-    """Every camera has a point."""
+    """Every camera has at least one point."""
     points = state["file"]["episodes"][str(episode_index)]["points"]
-    return all(points.get(key) for key in state["keys"])
+    return all(as_points(points.get(key)) for key in state["keys"])
 
 
 def progress(state: dict) -> str:
@@ -130,8 +135,14 @@ def save(state: dict, episode_index: int, frame_idx: int, points: dict, frames: 
 
 
 def describe(state: dict, episode_index: int, frame_idx: int, points: dict) -> str:
-    shown = ", ".join(f"{camera_name(k)}: " + (str(points[k]) if points.get(k) else "**?**")
-                      for k in state["keys"])
+    def one(key):
+        pts = as_points(points.get(key))
+        if not pts:
+            return "**?**"
+        plus = sum(1 for p in pts if p[2])
+        return f"{plus}+" + (f"/{len(pts) - plus}-" if len(pts) > plus else "")
+
+    shown = ", ".join(f"{camera_name(k)}: {one(k)}" for k in state["keys"])
     return f"**episode {episode_index}, frame {frame_idx}** -- {shown}"
 
 
@@ -164,25 +175,40 @@ def build_ui(state: dict) -> gr.Blocks:
                 *[mark(decode(frames[k][frame_idx]), points.get(k)) for k in keys],
                 *[None] * len(keys)]
 
-    def set_point(key, frames, frame_idx, episode_index, points, point):
-        """Every edit is the same: set one camera's point, adopt the frame, save, and
-        show what SAM3 segments from it."""
+    def apply(key, frames, frame_idx, episode_index, points, new_list):
+        """Every edit is the same: replace one camera's point list, adopt the frame, save,
+        and show what SAM3 segments from all of them together."""
         if not frames:
             raise gr.Error("Pick an episode first.")
         frame_idx, episode_index = int(frame_idx), int(episode_index)
-        points = {**points, key: point}
+        points = {**points, key: new_list}
         save(state, episode_index, frame_idx, points, frames)
         frame = decode(frames[key][frame_idx])
-        preview, note = sam_preview(frame, point)
+        preview, note = sam_preview(frame, new_list)
         return (points, describe(state, episode_index, frame_idx, points) + "  *(saved)*" + note,
-                progress(state), mark(frame, point), preview)
+                progress(state), mark(frame, new_list), preview)
 
     def on_click(key):
-        def handler(frames, frame_idx, episode_index, points, evt: gr.SelectData):
+        def handler(frames, frame_idx, episode_index, points, mode, evt: gr.SelectData):
+            """A click appends to this camera's list -- clicks accumulate, the toggle
+            decides whether this one grows the mask or carves out of it."""
             frame = decode(frames[key][int(frame_idx)])
             h, w = frame.shape[:2]
-            point = [round(evt.index[0] / w, 4), round(evt.index[1] / h, 4)]
-            return set_point(key, frames, frame_idx, episode_index, points, point)
+            label = 0 if mode.startswith("-") else 1
+            point = [round(evt.index[0] / w, 4), round(evt.index[1] / h, 4), label]
+            return apply(key, frames, frame_idx, episode_index, points,
+                         as_points(points.get(key)) + [point])
+        return handler
+
+    def on_clear(key):
+        def handler(frames, frame_idx, episode_index, points):
+            return apply(key, frames, frame_idx, episode_index, points, [])
+        return handler
+
+    def on_undo(key):
+        def handler(frames, frame_idx, episode_index, points):
+            return apply(key, frames, frame_idx, episode_index, points,
+                         as_points(points.get(key))[:-1])
         return handler
 
     def step(episode_index, delta):
@@ -199,19 +225,25 @@ def build_ui(state: dict) -> gr.Blocks:
         frames_state, points_state = gr.State({}), gr.State({})
         gr.Markdown(f"**{state['path']}** -- {len(indices)} episodes, {len(keys)} cameras. "
                     "Scrub to a frame where the item is visible in all views, then click it in "
-                    "each one. The row below each view is what SAM3 segments from that click.")
+                    "each one. The row below each view is what SAM3 segments from those clicks -- "
+                    "keep clicking the parts it misses until the mask covers the whole item.")
         counter = gr.Markdown()
+        mode = gr.Radio(["+ add to mask", "- subtract from mask"], value="+ add to mask",
+                        label="What a click does", scale=0)
         with gr.Row():
             prev_btn = gr.Button("< prev", scale=0)
             episode = gr.Dropdown(indices, value=indices[0], label="Episode", scale=1)
             next_btn = gr.Button("next >", scale=0)
             todo_btn = gr.Button("next unannotated >>", variant="primary", scale=0)
 
-        images, previews = [], []
+        images, previews, undo_btns, clear_btns = [], [], [], []
         with gr.Row():
             for key in keys:
                 with gr.Column():
                     images.append(gr.Image(label=camera_name(key), type="numpy", interactive=False))
+                    with gr.Row():
+                        undo_btns.append(gr.Button("undo last point", size="sm"))
+                        clear_btns.append(gr.Button("clear points", size="sm"))
                     previews.append(gr.Image(label=f"{camera_name(key)} -- SAM3 mask",
                                              type="numpy", interactive=False))
         frame_slider = gr.Slider(0, 1, step=1, value=0, label="Frame")
@@ -228,7 +260,9 @@ def build_ui(state: dict) -> gr.Blocks:
         for i, key in enumerate(keys):
             edit_ins = [frames_state, frame_slider, episode, points_state]
             edit_outs = [points_state, status, counter, images[i], previews[i]]
-            images[i].select(on_click(key), edit_ins, edit_outs)
+            images[i].select(on_click(key), edit_ins + [mode], edit_outs)
+            undo_btns[i].click(on_undo(key), edit_ins, edit_outs)
+            clear_btns[i].click(on_clear(key), edit_ins, edit_outs)
 
     return demo
 

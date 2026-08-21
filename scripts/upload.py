@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import av
-from huggingface_hub import HfApi
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -52,8 +52,9 @@ if __name__ == "__main__":
 
     shutil.copy(ANNOTATIONS, DATASET_DIR / "meta" / "masking_points.json")
 
-    api = HfApi()
-    api.create_repo(REPO_ID, repo_type="dataset", private=True, exist_ok=True)
-    api.upload_folder(folder_path=str(DATASET_DIR), repo_id=REPO_ID, repo_type="dataset",
-                      commit_message=f"masked copy of {DATASET_DIR.name}")
+    # `root` pointing at an existing dataset makes this a local load, no Hub round trip,
+    # so the repo does not have to exist yet. push_to_hub then creates it, uploads,
+    # writes the dataset card and -- the part that matters -- tags the commit with the
+    # codebase version, which is the only revision LeRobotDataset ever downloads.
+    LeRobotDataset(REPO_ID, root=DATASET_DIR).push_to_hub(private=True)
     print(f"Done -> https://huggingface.co/datasets/{REPO_ID}")

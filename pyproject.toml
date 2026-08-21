@@ -24,7 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+    "lerobot[dataset]>=0.3.2",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/facebookresearch/sam3"

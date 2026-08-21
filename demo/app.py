@@ -55,12 +55,19 @@ def reset_session(session_id: str) -> None:
     requests.post(f"{SERVER}/sessions/{session_id}/reset", timeout=60).raise_for_status()
 
 
-def predict(session_id, rgb, prompt=None, point=None):
-    """Send one frame; get back the overlay the server rendered (masks painted red)."""
+def predict(session_id, rgb, prompt=None, point=None, points=None):
+    """Send one frame; get back the overlay the server rendered (masks painted red).
+
+    `points` is the annotation shape -- [[x, y, label], ...] with label 1 to grow the
+    mask and 0 to carve out of it -- split here into what the server expects.
+    """
     payload = {"image": rgb_to_b64(rgb)}
     if prompt:
         payload["prompt"] = prompt
-    if point:
+    if points:
+        payload["points"] = [[p[0], p[1]] for p in points]
+        payload["point_labels"] = [int(p[2]) if len(p) > 2 else 1 for p in points]
+    elif point:
         payload["point"] = point
     r = requests.post(f"{SERVER}/sessions/{session_id}/predict", json=payload, timeout=120)
     r.raise_for_status()

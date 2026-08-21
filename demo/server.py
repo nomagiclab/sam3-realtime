@@ -43,8 +43,12 @@ def overlay_to_b64(frame: np.ndarray, masks: np.ndarray) -> str:
     return base64.b64encode(buf).decode()
 
 
-def infer_frame(session_id: str, frame: np.ndarray, prompt=None, point=None):
-    """Add one frame to a session, (optionally) set a prompt or point and run inference.
+def infer_frame(session_id: str, frame: np.ndarray, prompt=None, points=None, point_labels=None):
+    """Add one frame to a session, (optionally) set a prompt or points and run inference.
+
+    `points` is [[x, y], ...] in 0..1 coordinates with `point_labels` alongside it:
+    1 to grow the mask, 0 to carve out of it. They all describe one object, so several
+    positives on separate parts of it come back as one mask covering all of them.
 
     Returns (frame_index, outputs).
     `outputs` describes every object found on this frame
@@ -65,9 +69,12 @@ def infer_frame(session_id: str, frame: np.ndarray, prompt=None, point=None):
         if prompt:
             # a text prompt: set it once, the model reuses it on later frames
             request = {"type": "add_prompt", "session_id": session_id, "frame_index": idx, "text": prompt}
-        elif point:
+        elif points:
+            # one add_prompt with every point: the model replaces the frame's points on
+            # each call rather than accumulating, so partial lists would lose the rest
             request = {"type": "add_prompt", "session_id": session_id, "frame_index": idx,
-                       "points": [list(point)], "point_labels": [1],
+                       "points": [list(p) for p in points],
+                       "point_labels": list(point_labels or [1] * len(points)),
                        "obj_id": 1, "rel_coordinates": True}
         else:
             # no new prompt: just keep tracking whatever was asked earlier
@@ -150,13 +157,17 @@ def predict(session_id: str, body: dict):
 
     Returns the frame with the masks painted on it, plus per-object metadata.
 
-    Body:   {"image": <b64 jpeg/png>, "prompt": "cat" | null, "point": [x, y] | null}
+    Body:   {"image": <b64 jpeg/png>, "prompt": "cat" | null,
+             "point": [x, y] | null,                       # one positive point, shorthand
+             "points": [[x, y], ...], "point_labels": [1, 0, ...]}   # 1 adds, 0 subtracts
     Output: {"frame_index": int,
              "image": <b64 jpeg, masks painted red at alpha 0.75>,
              "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float}, ...]}
     """
     frame = b64_to_rgb(body["image"])
-    idx, out = infer_frame(session_id, frame, prompt=body.get("prompt"), point=body.get("point"))
+    points = body.get("points") or ([body["point"]] if body.get("point") else None)
+    idx, out = infer_frame(session_id, frame, prompt=body.get("prompt"),
+                           points=points, point_labels=body.get("point_labels"))
 
     # turn the model's numpy arrays into a JSON list of objects
     objects = []

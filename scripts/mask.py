@@ -97,6 +97,23 @@ def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, vide
         container.close()
 
 
+def report_points(annotations: dict, keys: list) -> None:
+    """Say out loud what will not be masked, before spending hours on what will.
+
+    A camera nobody answered for and one deliberately marked "not visible" both end up
+    copied through untouched, and they are indistinguishable in the output, so the only
+    place to catch a half-finished annotation is here.
+    """
+    for key in keys:
+        never = sorted(i for i, a in annotations.items() if key not in a["points"])
+        if never:
+            print(f"WARNING {camera_name(key)}: {len(never)} episodes were never answered for "
+                  f"(e.g. {never[:5]}) -- they will be copied through unmasked")
+    unmasked = {camera_name(key): sum(1 for a in annotations.values() if not a["points"].get(key))
+                for key in keys}
+    print(f"Episodes left unmasked per camera: {unmasked}")
+
+
 def main(annotations_path: str) -> None:
     ann_file = json.loads(Path(annotations_path).read_text())
     annotations = {int(k): v for k, v in ann_file["episodes"].items()}
@@ -112,6 +129,8 @@ def main(annotations_path: str) -> None:
     if missing:
         raise SystemExit(f"{len(missing)} episodes have no point in the json, "
                          f"e.g. {sorted(missing)[:5]} -- annotate them first")
+
+    report_points(annotations, keys)
 
     print(f"Copying {dataset_dir} -> {out_dir}")
     shutil.copytree(dataset_dir, out_dir)

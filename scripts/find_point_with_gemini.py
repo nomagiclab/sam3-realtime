@@ -239,11 +239,13 @@ def save_preview(frames: dict, points: dict, keys: list, path: Path) -> None:
     height = max(frames[k].shape[0] for k in keys)
     tiles = []
     for key in keys:
-        tile = mark(frames[key], points[key])
+        tile = mark(frames[key], points.get(key))
         if tile.shape[0] != height:  # match heights so they can sit in one row
             scale = height / tile.shape[0]
             tile = cv2.resize(tile, (round(tile.shape[1] * scale), height))
-        label = camera_name(key) + ("" if points[key] else " (not visible)")
+        # a camera can be missing from `points` entirely: not answered for yet
+        label = camera_name(key) + ("" if points.get(key) else
+                                    " (not visible)" if key in points else " (?)")
         cv2.putText(tile, label, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
         tiles.append(tile)
     cv2.imwrite(str(path), cv2.cvtColor(np.hstack(tiles), cv2.COLOR_RGB2BGR),

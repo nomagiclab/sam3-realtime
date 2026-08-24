@@ -22,8 +22,10 @@ scripts/init_annotations.py.
 Usage: python scripts/correct_point.py data/annotations/<name>.json
 """
 import argparse
+import concurrent.futures
 import json
 import sys
+import threading
 from pathlib import Path
 
 import av
@@ -47,7 +49,25 @@ def load_state(path: Path) -> dict:
     info = json.loads((dataset_dir / "meta" / "info.json").read_text())
     episodes = episode_offsets(load_episodes(dataset_dir), info).set_index("episode_index")
     return {"path": path, "file": ann_file, "keys": ann_file["cameras"],
-            "dataset_dir": dataset_dir, "info": info, "episodes": episodes}
+            "dataset_dir": dataset_dir, "info": info, "episodes": episodes,
+            "prefetch": None, "prefetch_lock": threading.Lock(),
+            "prefetch_executor": concurrent.futures.ThreadPoolExecutor(max_workers=1)}
+
+
+def _decode_camera(state: dict, ep, key: str) -> tuple:
+    """One camera's jpeg frames for episode `ep` -- the unit of work read_episode
+    fans out across threads, one per camera, since each reads its own file."""
+    chunk_col, file_col = file_columns(key)
+    src = state["dataset_dir"] / video_rel_path(state["info"], key, ep[chunk_col], ep[file_col])
+    container = av.open(str(src))
+    try:
+        frames = container.decode(video=0)
+        for _ in range(int(ep[f"offset:{key}"])):
+            next(frames)
+        return key, [encode(next(frames).to_ndarray(format="rgb24"))
+                     for _ in range(int(ep["length"]))]
+    finally:
+        container.close()
 
 
 def read_episode(state: dict, episode_index: int) -> dict:
@@ -56,23 +76,36 @@ def read_episode(state: dict, episode_index: int) -> dict:
     Decoded from the start of each file: seeking on these clips is not reliable, and
     the files are cut at 200 MB so the run-up is a few thousand frames, a handful of
     seconds. Kept as jpeg rather than arrays -- 15x less RAM, and decoding the one
-    frame on screen is free.
+    frame on screen is free. Cameras are separate files, so they decode in parallel
+    threads instead of one after another.
     """
     ep = state["episodes"].loc[episode_index]
-    out = {}
-    for key in state["keys"]:
-        chunk_col, file_col = file_columns(key)
-        src = state["dataset_dir"] / video_rel_path(state["info"], key, ep[chunk_col], ep[file_col])
-        container = av.open(str(src))
-        try:
-            frames = container.decode(video=0)
-            for _ in range(int(ep[f"offset:{key}"])):
-                next(frames)
-            out[key] = [encode(next(frames).to_ndarray(format="rgb24"))
-                        for _ in range(int(ep["length"]))]
-        finally:
-            container.close()
-    return out
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(state["keys"])) as pool:
+        return dict(pool.map(lambda key: _decode_camera(state, ep, key), state["keys"]))
+
+
+def take_prefetched(state: dict, episode_index: int) -> dict | None:
+    """The pending or finished result of a schedule_prefetch call for this episode, if
+    there is one -- waiting for it here is never worse than decoding from scratch."""
+    with state["prefetch_lock"]:
+        pending = state["prefetch"]
+        if not pending or pending["index"] != episode_index:
+            return None
+        state["prefetch"] = None
+    return pending["future"].result()
+
+
+def schedule_prefetch(state: dict, episode_index: int) -> None:
+    """Kick off decoding `episode_index` in the background, so it is ready by the time
+    the annotator clicks their way to it. A prefetch the annotator never lands on (they
+    went somewhere else instead) just finishes unused -- wasted CPU, bounded to one
+    episode, never a correctness issue, since decoding does not touch the points."""
+    with state["prefetch_lock"]:
+        pending = state["prefetch"]
+        if pending and pending["index"] == episode_index:
+            return
+        future = state["prefetch_executor"].submit(read_episode, state, episode_index)
+        state["prefetch"] = {"index": episode_index, "future": future}
 
 
 def encode(rgb: np.ndarray) -> bytes:
@@ -154,11 +187,14 @@ def build_ui(state: dict) -> gr.Blocks:
         """Load an episode and jump to the frame its annotation names."""
         episode_index = int(episode_index)
         ann = state["file"]["episodes"][str(episode_index)]
-        frames = read_episode(state, episode_index)
+        frames = take_prefetched(state, episode_index) or read_episode(state, episode_index)
         length = len(frames[keys[0]])
         frame_idx = min(ann["frame"], length - 1)
         points = {k: ann["points"][k] for k in keys if k in ann["points"]}
         previews, notes = zip(*[sam_preview(decode(frames[k][frame_idx]), points.get(k)) for k in keys])
+        next_index = step(episode_index, +1)
+        if next_index != episode_index:
+            schedule_prefetch(state, next_index)
         return [frames, points, gr.Slider(maximum=length - 1, value=frame_idx),
                 describe(state, episode_index, frame_idx, points) + "".join(set(notes)),
                 progress(state),

@@ -43,6 +43,12 @@ def overlay_to_b64(frame: np.ndarray, masks: np.ndarray) -> str:
     return base64.b64encode(buf).decode()
 
 
+def mask_to_b64(mask: np.ndarray) -> str:
+    """(H, W) bool mask -> base64 png string"""
+    ok, buf = cv2.imencode(".png", mask.astype(np.uint8) * 255)
+    return base64.b64encode(buf).decode()
+
+
 def infer_frame(session_id: str, frame: np.ndarray, prompt=None, point=None):
     """Add one frame to a session, (optionally) set a prompt or point and run inference.
 
@@ -153,7 +159,8 @@ def predict(session_id: str, body: dict):
     Body:   {"image": <b64 jpeg/png>, "prompt": "cat" | null, "point": [x, y] | null}
     Output: {"frame_index": int,
              "image": <b64 jpeg, masks painted red at alpha 0.75>,
-             "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float}, ...]}
+             "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float,
+                          "mask": <b64 png>}, ...]}
     """
     frame = b64_to_rgb(body["image"])
     idx, out = infer_frame(session_id, frame, prompt=body.get("prompt"), point=body.get("point"))
@@ -165,6 +172,7 @@ def predict(session_id: str, body: dict):
             "id": int(out["out_obj_ids"][i]),
             "box_xywh": [float(v) for v in out["out_boxes_xywh"][i]],
             "prob": float(out["out_probs"][i]),
+            "mask": mask_to_b64(out["out_binary_masks"][i]),
         })
 
     return {

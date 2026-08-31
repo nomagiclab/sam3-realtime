@@ -3,6 +3,7 @@ It takes one image at a time and outputs a mask (and a few other things).
 It is stateful, so it uses previous masks to make a prediciton.
 
 ## Run the server:
+Set `HF_TOKEN` environment variable, then:
 ```bash
 uv run demo/server.py
 ```

@@ -19,6 +19,12 @@ just tracked:
 
   - "prompt": a text description.
   - "point":  an [x, y] click in 0..1 coords (0,0 = top-left).
+  - "camera": "wrist_left" / "wrist_right" -- which camera this frame comes from.
+              The tool is bolted to the arm, so it sits in the same pixels of that
+              camera on every frame; the server keeps a mask of it and returns
+              mask AND NOT tool. Rebuild those masks from the data with
+              `uv run scripts/find_tool_mask.py` (check them with
+              `uv run scripts/test_tool_mask.py`).
 
 ```javascript
   POST /sessions
@@ -29,7 +35,8 @@ just tracked:
   POST /sessions/{id}/predict
     Does:   segments one frame; if a prompt/point is given it is set first, then
             every later frame is tracked.
-    Input:  {"image": <b64 jpeg/png>, "prompt": "cat" | null, "point": [x, y] | null}.
+    Input:  {"image": <b64 jpeg/png>, "prompt": "cat" | null, "point": [x, y] | null,
+             "camera": "wrist_left" | "wrist_right" | null}.
     Output: {"frame_index": int,
              "image": <b64 jpeg>,
              "objects": [{"id", "box_xywh", "prob"}, ...]}.

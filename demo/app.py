@@ -55,13 +55,18 @@ def reset_session(session_id: str) -> None:
     requests.post(f"{SERVER}/sessions/{session_id}/reset", timeout=60).raise_for_status()
 
 
-def predict(session_id, rgb, prompt=None, point=None, points=None):
+def predict(session_id, rgb, prompt=None, point=None, points=None, camera=None):
     """Send one frame; get back the overlay the server rendered (masks painted red).
 
     `points` is the annotation shape -- [[x, y, label], ...] with label 1 to grow the
     mask and 0 to carve out of it -- split here into what the server expects.
+
+    `camera` ("wrist_left" / "wrist_right") tells the server which frame this is, so it
+    can cut its tool out of the mask.
     """
     payload = {"image": rgb_to_b64(rgb)}
+    if camera:
+        payload["camera"] = camera
     if prompt:
         payload["prompt"] = prompt
     if points:

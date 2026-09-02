@@ -1,7 +1,9 @@
 import base64
+import functools
 import json
 import os
 import threading
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -19,6 +21,10 @@ PREDICTOR = build_sam3_stream_predictor(device=DEVICE)
 
 # Lock for multiple threads
 LOCK = threading.Lock()
+
+# One mask per wrist camera, marking where the tool sits (it is bolted to the arm, so
+# it never moves in that camera's frame). Built by scripts/find_tool_mask.py.
+TOOL_MASK_DIR = Path(__file__).resolve().parent / "tool_masks"
 
 app = FastAPI(title="SAM3 server")
 
@@ -47,6 +53,43 @@ def mask_to_b64(mask: np.ndarray) -> str:
     """(H, W) bool mask -> base64 png string"""
     ok, buf = cv2.imencode(".png", mask.astype(np.uint8) * 255)
     return base64.b64encode(buf).decode()
+
+
+@functools.lru_cache(maxsize=8)
+def tool_mask(camera: str, shape: tuple) -> np.ndarray:
+    """(H, W) bool: where `camera` always sees the tool, resized to `shape` = (H, W).
+
+    Unknown camera -> all False, so callers can pass whatever they have.
+    """
+    path = TOOL_MASK_DIR / f"{camera}.png" if camera else None
+    if path is None or not path.exists():
+        return np.zeros(shape, bool)
+    mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if mask.shape != shape:
+        # A different resolution of the same camera is fine, a different aspect ratio is
+        # a different rig: stretching the mask onto it would carve out the wrong pixels,
+        # and silently masking the wrong thing is worse than stopping.
+        if round(mask.shape[1] / mask.shape[0], 2) != round(shape[1] / shape[0], 2):
+            raise HTTPException(status_code=400, detail=(
+                f"{camera} mask is {mask.shape[1]}x{mask.shape[0]}, the frame is "
+                f"{shape[1]}x{shape[0]} -- a different rig needs its own tool mask"))
+        # nearest keeps it binary; the tool is a solid blob so resampling is harmless
+        mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    return mask > 127
+
+
+def box_xywh(mask: np.ndarray):
+    """(H, W) bool mask -> its bounding box [x, y, w, h] in 0..1, or None if empty.
+
+    Recomputed here because carving the tool out can shrink an object, and a box that
+    still covered the tool would contradict the mask next to it.
+    """
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return None
+    h, w = mask.shape
+    return [float(xs.min()) / w, float(ys.min()) / h,
+            float(xs.max() - xs.min() + 1) / w, float(ys.max() - ys.min() + 1) / h]
 
 
 def infer_frame(session_id: str, frame: np.ndarray, prompt=None, points=None, point_labels=None):
@@ -165,7 +208,8 @@ def predict(session_id: str, body: dict):
 
     Body:   {"image": <b64 jpeg/png>, "prompt": "cat" | null,
              "point": [x, y] | null,                       # one positive point, shorthand
-             "points": [[x, y], ...], "point_labels": [1, 0, ...]}   # 1 adds, 0 subtracts
+             "points": [[x, y], ...], "point_labels": [1, 0, ...],   # 1 adds, 0 subtracts
+             "camera": "wrist_left" | "wrist_right" | null}          # cut the tool out
     Output: {"frame_index": int,
              "image": <b64 jpeg, masks painted red at alpha 0.75>,
              "objects": [{"id": int, "box_xywh": [x, y, w, h], "prob": float,
@@ -176,19 +220,22 @@ def predict(session_id: str, body: dict):
     idx, out = infer_frame(session_id, frame, prompt=body.get("prompt"),
                            points=points, point_labels=body.get("point_labels"))
 
+    # the tool is part of the robot, never part of what we asked for: mask AND NOT tool
+    masks = out["out_binary_masks"] & ~tool_mask(body.get("camera"), frame.shape[:2])
+
     # turn the model's numpy arrays into a JSON list of objects
     objects = []
     for i in range(len(out["out_obj_ids"])):
         objects.append({
             "id": int(out["out_obj_ids"][i]),
-            "box_xywh": [float(v) for v in out["out_boxes_xywh"][i]],
+            "box_xywh": box_xywh(masks[i]) or [float(v) for v in out["out_boxes_xywh"][i]],
             "prob": float(out["out_probs"][i]),
-            "mask": mask_to_b64(out["out_binary_masks"][i]),
+            "mask": mask_to_b64(masks[i]),
         })
 
     return {
         "frame_index": idx,
-        "image": overlay_to_b64(frame, out["out_binary_masks"]),
+        "image": overlay_to_b64(frame, masks),
         "objects": objects,
     }
 

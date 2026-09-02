@@ -163,3 +163,8 @@ outputs/
 !.pixi/config.toml
 
 data/
+
+# tool mask previews/debug images, regenerate with scripts/preview_tool_mask.py
+demo/tool_masks/*_preview.png
+demo/tool_masks/*_score.png
+demo/tool_masks/*_overlay.png

@@ -37,18 +37,20 @@ from find_point_with_gemini import (  # noqa: E402
 )
 
 
-def track(frames: list, points: list) -> list:
+def track(frames: list, points: list, camera: str) -> list:
     """Mask a run of frames in one session, prompting with `points` on the first one.
-    Returns the server's overlays, in the order the frames were given."""
+    Returns the server's overlays, in the order the frames were given.
+
+    `camera` goes along so the server can cut its tool out of every mask."""
     session_id = new_session()
     try:
-        return [predict(session_id, frame, points=points if i == 0 else None)
+        return [predict(session_id, frame, points=points if i == 0 else None, camera=camera)
                 for i, frame in enumerate(frames)]
     finally:
         close_session(session_id)
 
 
-def mask_episode(frames: list, seed: int, prompt, bar=None) -> list:
+def mask_episode(frames: list, seed: int, prompt, camera: str, bar=None) -> list:
     """Mask one episode's frames, seeded at index `seed`. Returns one frame out per
     frame in -- the frames untouched if there is no prompt (item not visible here).
 
@@ -62,10 +64,10 @@ def mask_episode(frames: list, seed: int, prompt, bar=None) -> list:
     if not points:
         out = frames
     elif seed == 0:
-        out = track(frames, points)
+        out = track(frames, points, camera)
     else:
-        backward = track(frames[seed::-1], points)        # seed .. 0
-        forward = track(frames[seed:], points)            # seed .. end
+        backward = track(frames[seed::-1], points, camera)   # seed .. 0
+        forward = track(frames[seed:], points, camera)       # seed .. end
         out = backward[:0:-1] + forward                   # drop backward's seed copy
     if bar:
         bar.update(len(out))  # after both halves: the seed frame is masked twice, kept once
@@ -94,7 +96,8 @@ def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, vide
             for _, ep in episodes.sort_values("episode_index").iterrows():
                 ann = annotations[int(ep["episode_index"])]
                 for frame in mask_episode(episode_frames(frames, int(ep["length"])),
-                                          ann["frame"], ann["points"].get(video_key), bar):
+                                          ann["frame"], ann["points"].get(video_key),
+                                          camera_name(video_key), bar):
                     writer.write(frame)
     finally:
         writer.close()
@@ -185,7 +188,8 @@ def preview_episode(annotations_path: str, episode_index: int) -> list:
                 next(frames)
             with tqdm(total=int(ep["length"]), desc=out_path.name, unit="frame") as bar:
                 for frame in mask_episode(episode_frames(frames, int(ep["length"])),
-                                          ann["frame"], ann["points"].get(key), bar):
+                                          ann["frame"], ann["points"].get(key),
+                                          camera_name(key), bar):
                     writer.write(frame)
         finally:
             writer.close()

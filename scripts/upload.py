@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from find_point_with_gemini import load_episodes, video_keys, video_rel_path  # noqa: E402
 
-NAME = "ind-iso-2"
+NAME = "ind-iso-6"
 DATASET_DIR = REPO_ROOT / "data" / "masked" / NAME
 ANNOTATIONS = REPO_ROOT / "data" / "annotations" / f"{NAME}.json"
 REPO_ID = f"nomagic/{NAME}-masked"

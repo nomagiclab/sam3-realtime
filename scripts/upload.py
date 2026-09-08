@@ -1,4 +1,5 @@
 
+import argparse
 import json
 import shutil
 import sys
@@ -12,10 +13,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from find_point_with_gemini import load_episodes, video_keys, video_rel_path  # noqa: E402
 
-NAME = "ind-iso-6"
-DATASET_DIR = REPO_ROOT / "data" / "masked" / NAME
-ANNOTATIONS = REPO_ROOT / "data" / "annotations" / f"{NAME}.json"
-REPO_ID = f"nomagic/{NAME}-masked"
 
 
 def check(dataset_dir: Path) -> list:
@@ -44,6 +41,15 @@ def check(dataset_dir: Path) -> list:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Push one masked dataset to the Hub.")
+    parser.add_argument("name", help="e.g. ind-pnp-0, under data/masked/")
+    parser.add_argument("--repo-id", help="default: nomagic/<name>-masked")
+    args = parser.parse_args()
+
+    DATASET_DIR = REPO_ROOT / "data" / "masked" / args.name
+    ANNOTATIONS = REPO_ROOT / "data" / "annotations" / f"{args.name}.json"
+    REPO_ID = args.repo_id or f"nomagic/{args.name}-masked"
+
     print(f"Checking {DATASET_DIR}")
     problems = check(DATASET_DIR)
     if problems:

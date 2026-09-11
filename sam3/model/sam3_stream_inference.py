@@ -42,7 +42,12 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
         image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
         compile_model: bool = False,
         # memory bounding knobs (CPU ingress + bounded caches like offline)
-        max_cached_frames: int = 128,
+        # only the newest frames' masks are ever read back (a prompt lands on the frame
+        # that was just added), so there is no reason to hold a full-res mask per object
+        # for 128 of them
+        max_cached_frames: int = 8,
+        # how many frames of tracker memory to keep; a stream never looks further back
+        max_memory_frames: int = 64,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -51,6 +56,7 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
         self.image_std = image_std
         self.compile_model = compile_model
         self.max_cached_frames = max_cached_frames
+        self.max_memory_frames = max_memory_frames
 
     @torch.inference_mode()
     def init_stream_state(self) -> Dict[str, Any]:
@@ -379,6 +385,7 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
 
         inference_state["tracker_inference_states"] = tracker_states_local_new
         inference_state["tracker_metadata"] = tracker_metadata_new
+        self._prune_tracker_memory(inference_state, frame_idx)
         inference_state["previous_stages_out"][frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
 
         # Do not cache yet; caching happens after postprocess below (with suppression filtering)
@@ -419,6 +426,26 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
         else:
             # Mirroring original behavior for non-rank0 processes
             return None
+
+    def _prune_tracker_memory(self, inference_state, frame_idx):
+        """Drop the tracker's memory of frames older than `max_memory_frames`.
+
+        The tracker keeps every frame's memory features and mask logits on the GPU
+        forever (~1 MiB per frame per object), but memory attention only ever reaches
+        back `num_maskmem` memories and `max_obj_ptrs_in_encoder` pointers, so on a
+        stream -- which never goes back -- everything older is dead weight. A window of
+        64 leaves memory selection far more candidates than the 15 it picks.
+        """
+        cutoff = frame_idx - self.max_memory_frames
+        if cutoff <= 0:
+            return
+        for trk_state in inference_state["tracker_inference_states"]:
+            per_obj = trk_state["output_dict_per_obj"].values()
+            for out_dict in [trk_state["output_dict"], *per_obj]:
+                # ponytail: rescanning the (now bounded) window each frame, drop the
+                # scan for a deque of frame indices only if profiling ever shows it
+                for old in [t for t in out_dict["non_cond_frame_outputs"] if t < cutoff]:
+                    out_dict["non_cond_frame_outputs"].pop(old)
 
     def _postprocess_output(
         self,
@@ -556,20 +583,23 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
         torch._dynamo.config.accumulated_cache_size_limit = 2048
         torch._dynamo.config.capture_scalar_outputs = True
         torch._dynamo.config.suppress_errors = True
+        # every mode below is "no-cudagraphs": a CUDA graph's output tensor is overwritten
+        # by the next run, and necks.py keeps one across frames (its position encoding),
+        # which makes the plain "max-autotune" modes blow up on the second frame
         self.detector.backbone.vision_backbone.forward = clone_output_wrapper(
-            torch.compile(self.detector.backbone.vision_backbone.forward, fullgraph=True, mode="max-autotune")
+            torch.compile(self.detector.backbone.vision_backbone.forward, fullgraph=True, mode="max-autotune-no-cudagraphs")
         )
         self.detector.transformer.encoder.forward = clone_output_wrapper(
-            torch.compile(self.detector.transformer.encoder.forward, fullgraph=True, mode="max-autotune")
+            torch.compile(self.detector.transformer.encoder.forward, fullgraph=True, mode="max-autotune-no-cudagraphs")
         )
         self.detector.transformer.decoder.forward = clone_output_wrapper(
-            torch.compile(self.detector.transformer.decoder.forward, fullgraph=True, mode="max-autotune", dynamic=False)
+            torch.compile(self.detector.transformer.decoder.forward, fullgraph=True, mode="max-autotune-no-cudagraphs", dynamic=False)
         )
         self.detector.segmentation_head.forward = clone_output_wrapper(
-            torch.compile(self.detector.segmentation_head.forward, fullgraph=True, mode="max-autotune")
+            torch.compile(self.detector.segmentation_head.forward, fullgraph=True, mode="max-autotune-no-cudagraphs")
         )
         self.tracker.maskmem_backbone.forward = compile_wrapper(
-            self.tracker.maskmem_backbone.forward, mode="max-autotune", fullgraph=True, dynamic=False
+            self.tracker.maskmem_backbone.forward, mode="max-autotune-no-cudagraphs", fullgraph=True, dynamic=False
         )
         self.tracker.transformer.encoder.forward = shape_logging_wrapper(
             compile_wrapper(
@@ -581,7 +611,7 @@ class Sam3StreamInference(Sam3VideoInferenceWithInstanceInteractivity):
             keep_kwargs=["src", "src_pos", "prompt", "prompt_pos"],
         )
         self.tracker.sam_mask_decoder.forward = compile_wrapper(
-            self.tracker.sam_mask_decoder.forward, mode="max-autotune", fullgraph=True, dynamic=False
+            self.tracker.sam_mask_decoder.forward, mode="max-autotune-no-cudagraphs", fullgraph=True, dynamic=False
         )
         self._model_is_compiled = True
 

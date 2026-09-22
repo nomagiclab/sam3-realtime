@@ -12,7 +12,7 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from demo.app import SERVER, H264Writer, new_session, close_session, predict, rgb_to_b64  # noqa: E402
+from demo.app import SERVER, VideoWriter, new_session, close_session, predict, rgb_to_b64  # noqa: E402
 
 VIDEO_KEY = "observation.images.side"
 
@@ -62,7 +62,7 @@ def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, fps:
     """episodes: the rows (one per episode) packed into this one physical video file."""
     container = av.open(str(src_path))
     frames = container.decode(video=0)
-    writer = H264Writer(str(dst_path), fps)
+    writer = VideoWriter(str(dst_path), fps)
     total = int(episodes["length"].sum())
     try:
         with tqdm(total=total, desc=dst_path.name, unit="frame") as bar:
@@ -128,7 +128,7 @@ def test_episode(dataset_dir: str, episode_index: int) -> Path:
     for _ in range(skip):
         next(frames)
 
-    writer = H264Writer(str(out_path), fps)
+    writer = VideoWriter(str(out_path), fps)
     session_id = new_session()
     try:
         for i in tqdm(range(int(ep["length"])), desc=out_path.name, unit="frame"):

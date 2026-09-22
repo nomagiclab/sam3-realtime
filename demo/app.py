@@ -116,46 +116,73 @@ def show_first_frame(video_path):
     """When a video is uploaded, show its first frame so a point can be clicked."""
     if not video_path:
         return None, None
-    cap = cv2.VideoCapture(video_path)
-    ok, bgr = cap.read()
-    cap.release()
-    if not ok:
+    frame = next(sampled_frames(video_path, stride=1), None)
+    if frame is None:
         return None, None
-    frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     return frame, frame  # preview, stored-original
 
 
+def video_info(path: str):
+    """Return (fps, frame_count) of a video file. frame_count is 0 if unknown."""
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        fps = float(stream.average_rate or stream.guessed_rate or 25)
+        return fps, int(stream.frames or 0)
+
+
 def sampled_frames(path: str, stride: int):
-    """Yield RGB frames from a video file, keeping 1 out of every `stride`."""
-    cap = cv2.VideoCapture(path)
-    try:
-        i = 0
-        while True:
-            ok, bgr = cap.read()
-            if not ok:
-                break
+    """Yield RGB frames from a video file, keeping 1 out of every `stride`.
+
+    Decoded with PyAV rather than cv2.VideoCapture: OpenCV's bundled FFmpeg has
+    no software AV1 decoder, so AV1 uploads (common from phones/browsers) open
+    but return no frames. PyAV ships libdav1d and handles them."""
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        for i, frame in enumerate(container.decode(stream)):
             if i % stride == 0:
-                yield cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            i += 1
-    finally:
-        cap.release()
+                yield frame.to_ndarray(format="rgb24")
 
 
-class H264Writer:
-    """Write RGB frames to a browser-playable H.264 mp4 via PyAV/libx264.
-    (cv2's built-in mp4v codec produces files browsers cannot play.)"""
+class VideoWriter:
+    """Write RGB frames to an mp4 via PyAV. Two codecs, because there are two jobs.
 
-    def __init__(self, path: str, fps: float):
-        self.path, self.fps = path, fps
+    h264 is the default: a browser will play it, and the preview clips are watched in one.
+    (cv2's built-in mp4v codec produces files browsers cannot play.) Its cost is that
+    yuv420p halves the chroma planes in both directions, so the frame has to have even
+    sides and an odd one loses its last row or column.
+
+    av1 is what masking a whole dataset asks for, and not merely av1 but lerobot's av1:
+    the same encoder with the same settings that wrote the recordings in the first place
+    (`lerobot.configs.video.rgb_encoder_defaults`: libsvtav1, yuv420p, a keyframe every
+    second frame, crf 30, preset 12). The masked copy is meant to be compared with the
+    original frame for frame, and any difference in how the two were compressed would show
+    up in that comparison as if it were part of the mask. It also takes the odd width these
+    recordings have (355) as it is, where yuv420p h264 would crop it to 354.
+    """
+
+    CODECS = {"h264": "libx264", "av1": "libsvtav1"}
+    OPTIONS = {"h264": {}, "av1": {"g": "2", "crf": "30", "preset": "12",
+                                   "svtav1-params": "fast-decode=0"}}
+    # faststart puts the index at the front so a browser can start playing before the
+    # download ends; lerobot does not set it, and the dataset copy should be laid out as
+    # lerobot lays its own out.
+    CONTAINER = {"h264": {"movflags": "faststart"}, "av1": {}}
+
+    def __init__(self, path: str, fps: float, codec: str = "h264"):
+        self.path, self.fps, self.codec = path, fps, codec
+        self.even = codec == "h264"
         self.container = self.stream = None  # opened lazily on the first frame
 
     def write(self, rgb: np.ndarray):
-        # H.264 requires even width/height, so drop the last row/column if odd
-        height, width = rgb.shape[:2]
-        rgb = rgb[:height - height % 2, :width - width % 2]
+        if self.even:
+            height, width = rgb.shape[:2]
+            rgb = rgb[:height - height % 2, :width - width % 2]
         if self.container is None:
-            self.container = av.open(self.path, "w", options={"movflags": "faststart"})
-            self.stream = self.container.add_stream("libx264", rate=round(self.fps) or 1)
+            self.container = av.open(self.path, "w", options=self.CONTAINER[self.codec])
+            self.stream = self.container.add_stream(self.CODECS[self.codec],
+                                                    rate=round(self.fps) or 1,
+                                                    options=self.OPTIONS[self.codec])
             self.stream.width, self.stream.height = rgb.shape[1], rgb.shape[0]
             self.stream.pix_fmt = "yuv420p"
         for pkt in self.stream.encode(av.VideoFrame.from_ndarray(rgb, "rgb24")):
@@ -200,10 +227,7 @@ def run_video(video_path, mode, prompt, point, target_fps, progress=gr.Progress(
             raise gr.Error("Enter a text prompt (or switch to Point).")
         first_prompt, first_point = prompt, None
 
-    cap = cv2.VideoCapture(video_path)
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
+    src_fps, frame_count = video_info(video_path)
 
     # e.g. a 30 fps clip at target 6 fps -> segment every 5th frame
     if target_fps:
@@ -214,7 +238,7 @@ def run_video(video_path, mode, prompt, point, target_fps, progress=gr.Progress(
     total = math.ceil(frame_count / stride) if frame_count > 0 else 0
 
     overlay_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-    overlay_writer = H264Writer(overlay_path, src_fps / stride)
+    overlay_writer = VideoWriter(overlay_path, src_fps / stride)
 
     session_id = new_session()
     processed = 0
@@ -246,7 +270,7 @@ CSS = """
 #prompt_row button { align-self: flex-end; }
 """
 
-with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
+with gr.Blocks(title="SAM3 real-time") as demo:
     with gr.Tab("Video file"):
         vid_point, vid_frame0 = gr.State(None), gr.State(None)
         with gr.Row():
@@ -283,4 +307,4 @@ with gr.Blocks(title="SAM3 real-time", css=CSS) as demo:
 
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=7860)
+    demo.queue().launch(server_name="0.0.0.0", server_port=7860, css=CSS)

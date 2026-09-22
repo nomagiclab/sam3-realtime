@@ -31,9 +31,10 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from demo.app import H264Writer, close_session, new_session, predict  # noqa: E402
+from demo.app import VideoWriter, close_session, new_session, predict  # noqa: E402
 from find_point_with_gemini import (  # noqa: E402
-    as_points, camera_name, episode_offsets, file_columns, load_episodes, video_rel_path,
+    as_points, camera_name, episode_offsets, file_columns, load_episodes, seed_frame,
+    video_rel_path,
 )
 
 
@@ -80,7 +81,7 @@ def episode_frames(frames_iter, length: int) -> list:
 
 
 def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, video_key: str,
-                    annotations: dict, fps: float) -> None:
+                    annotations: dict, fps: float, report=None) -> None:
     """episodes: the rows (one per episode) packed into this one physical video file.
 
     One decoder for the whole file: the episodes in it are back to back, so each
@@ -88,14 +89,18 @@ def mask_video_file(src_path: Path, dst_path: Path, episodes: pd.DataFrame, vide
     """
     container = av.open(str(src_path))
     frames = container.decode(video=0)
-    writer = H264Writer(str(dst_path), fps)
+    writer = VideoWriter(str(dst_path), fps, codec="av1")
     try:
         with tqdm(total=int(episodes["length"].sum()), desc=dst_path.name, unit="frame") as bar:
             for _, ep in episodes.sort_values("episode_index").iterrows():
                 ann = annotations[int(ep["episode_index"])]
-                for frame in mask_episode(episode_frames(frames, int(ep["length"])),
-                                          ann["frame"], ann["points"].get(video_key), bar):
+                masked = mask_episode(episode_frames(frames, int(ep["length"])),
+                                      seed_frame(ann, video_key),
+                                      ann["points"].get(video_key), bar)
+                for frame in masked:
                     writer.write(frame)
+                if report:
+                    report(len(masked))
     finally:
         writer.close()
         container.close()
@@ -118,7 +123,21 @@ def report_points(annotations: dict, keys: list) -> None:
     print(f"Episodes left unmasked per camera: {unmasked}")
 
 
-def main(annotations_path: str) -> None:
+def planned_frames(annotations_path: str) -> int:
+    """How many frames a full run over this points file will write, counting every camera.
+
+    The batch runner asks before it starts, so that four datasets of different sizes share
+    one progress bar that means something -- a bar over datasets would jump in steps of a
+    quarter and tell nobody when it will be done.
+    """
+    ann_file = json.loads(Path(annotations_path).read_text())
+    dataset_dir = REPO_ROOT / "data" / "clear" / ann_file["dataset"]
+    info = json.loads((dataset_dir / "meta" / "info.json").read_text())
+    episodes = load_episodes(dataset_dir)
+    return int(episodes["length"].sum()) * len(ann_file["cameras"])
+
+
+def main(annotations_path: str, report=None) -> None:
     ann_file = json.loads(Path(annotations_path).read_text())
     annotations = {int(k): v for k, v in ann_file["episodes"].items()}
     keys = ann_file["cameras"]
@@ -141,8 +160,15 @@ def main(annotations_path: str) -> None:
 
     info_path = out_dir / "meta" / "info.json"
     out_info = json.loads(info_path.read_text())
+    # The masked copy is re-encoded but comes out the same shape and the same codec as the
+    # source, so the only honest edit to this file is none at all. That is the point of
+    # writing av1 rather than h264: h264 in yuv420p refuses an odd width, and the side
+    # camera is 355 wide, so it would have cost a column and left this file describing a
+    # frame nobody wrote. Asserted rather than assumed, because it is quiet when wrong.
     for key in keys:
-        out_info["features"][key]["info"]["video.codec"] = "h264"  # re-encoded below, was av1
+        assert out_info["features"][key]["info"]["video.codec"] == "av1", (
+            f"{camera_name(key)} is {out_info['features'][key]['info']['video.codec']}, "
+            f"not av1: the masked copy would no longer match this file")
     info_path.write_text(json.dumps(out_info, indent=4))
 
     for key in keys:
@@ -154,7 +180,8 @@ def main(annotations_path: str) -> None:
                            if not annotations[int(ep["episode_index"])]["points"].get(key))
             print(f"Masking {rel} ({len(group)} episodes, {int(group['length'].sum())} frames"
                   + (f", {unmasked} without a point" if unmasked else "") + ")")
-            mask_video_file(dataset_dir / rel, out_dir / rel, group, key, annotations, fps)
+            mask_video_file(dataset_dir / rel, out_dir / rel, group, key, annotations, fps,
+                            report)
 
     print(f"Done -> {out_dir}")
 
@@ -178,14 +205,14 @@ def preview_episode(annotations_path: str, episode_index: int) -> list:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         container = av.open(str(src))
-        writer = H264Writer(str(out_path), info["features"][key]["info"]["video.fps"])
+        writer = VideoWriter(str(out_path), info["features"][key]["info"]["video.fps"])
         try:
             frames = container.decode(video=0)
             for _ in range(int(ep[f"offset:{key}"])):
                 next(frames)
             with tqdm(total=int(ep["length"]), desc=out_path.name, unit="frame") as bar:
                 for frame in mask_episode(episode_frames(frames, int(ep["length"])),
-                                          ann["frame"], ann["points"].get(key), bar):
+                                          seed_frame(ann, key), ann["points"].get(key), bar):
                     writer.write(frame)
         finally:
             writer.close()
@@ -211,3 +238,139 @@ if __name__ == "__main__":
         preview_episode(args.annotations, args.episode)
     else:
         main(args.annotations)
+
+
+# --- re-masking only the episodes somebody flagged -----------------------------------------
+#
+# A masked dataset that is mostly right should not be redone from scratch: SAM3 runs at
+# ~13 fps per camera, so a 200k-frame recording is hours, and the good episodes would come
+# out the same. Instead the flagged episodes are masked again from the clear recording and
+# spliced into the existing masked copy. Episodes share video files, so a file holding one
+# flagged episode is re-encoded whole (its good episodes decoded from the masked copy and
+# written back, one more compression pass at the same settings); a file with none is copied
+# byte for byte.
+
+MASKED_PREV_DIR = REPO_ROOT / "data" / "masked_prev"
+
+
+def flagged_episodes(ann_file: dict) -> list:
+    return sorted(int(k) for k, a in ann_file["episodes"].items() if a.get("bad"))
+
+
+def planned_remask_frames(annotations_path: str) -> int:
+    """Frames the re-mask will write: every frame of every file that holds a flagged
+    episode, per camera. Copied files cost nothing and are not counted."""
+    ann_file = json.loads(Path(annotations_path).read_text())
+    flagged = set(flagged_episodes(ann_file))
+    if not flagged:
+        return 0
+    dataset_dir = REPO_ROOT / "data" / "clear" / ann_file["dataset"]
+    info = json.loads((dataset_dir / "meta" / "info.json").read_text())
+    episodes = episode_offsets(load_episodes(dataset_dir), info)
+    total = 0
+    for key in ann_file["cameras"]:
+        chunk_col, file_col = file_columns(key)
+        for _, group in episodes.groupby([chunk_col, file_col]):
+            if flagged & set(group["episode_index"].astype(int)):
+                total += int(group["length"].sum())
+    return total
+
+
+def _splice_video_file(clear_path: Path, masked_path: Path, dst_path: Path, episodes: pd.DataFrame,
+                       video_key: str, annotations: dict, flagged: set, fps: float, report=None) -> None:
+    """One physical file: good episodes come out of the masked copy, flagged ones are
+    masked afresh from the clear recording. Both sources are laid out identically, so
+    two decoders stepping in lockstep never need to seek."""
+    clear, masked = av.open(str(clear_path)), av.open(str(masked_path))
+    clear_frames, masked_frames = clear.decode(video=0), masked.decode(video=0)
+    writer = VideoWriter(str(dst_path), fps, codec="av1")
+    try:
+        with tqdm(total=int(episodes["length"].sum()), desc=dst_path.name, unit="frame") as bar:
+            for _, ep in episodes.sort_values("episode_index").iterrows():
+                index, length = int(ep["episode_index"]), int(ep["length"])
+                if index in flagged:
+                    ann = annotations[index]
+                    out = mask_episode(episode_frames(clear_frames, length),
+                                       seed_frame(ann, video_key), ann["points"].get(video_key), bar)
+                    for _ in range(length):  # keep the masked decoder in step
+                        next(masked_frames)
+                else:
+                    out = episode_frames(masked_frames, length)
+                    for _ in range(length):
+                        next(clear_frames)
+                    bar.update(length)
+                for frame in out:
+                    writer.write(frame)
+                if report:
+                    report(length)
+    finally:
+        writer.close()
+        clear.close()
+        masked.close()
+
+
+def remask_flagged(annotations_path: str, report=None) -> dict:
+    """Mask the flagged episodes again and splice them into data/masked/<name>.
+
+    The previous masked copy is kept under data/masked_prev/<name>-<time>, the points file
+    has the flags cleared and the episodes marked `remasked`, so the window shows them as
+    ones to look at once more. Returns {"remasked": [...], "files": n, "copied": n}.
+    """
+    import shutil as _shutil
+    import time as _time
+
+    ann_file = json.loads(Path(annotations_path).read_text())
+    annotations = {int(k): v for k, v in ann_file["episodes"].items()}
+    keys = ann_file["cameras"]
+    flagged = set(flagged_episodes(ann_file))
+    if not flagged:
+        raise SystemExit("no episode is flagged as bad; nothing to re-mask")
+    name = ann_file["dataset"]
+    clear_dir = REPO_ROOT / "data" / "clear" / name
+    masked_dir = REPO_ROOT / "data" / "masked" / name
+    if not (masked_dir / "meta" / "info.json").exists():
+        raise SystemExit(f"{masked_dir} does not exist; mask the whole dataset first")
+    unanswered = [i for i in sorted(flagged) if not all(as_points(annotations[i]["points"].get(k)) for k in keys)]
+    if unanswered:
+        raise SystemExit(f"flagged episodes without a point in every camera: {unanswered} -- "
+                         "click them first, or clear the flag")
+
+    work_dir = REPO_ROOT / "data" / "masked" / f"_remask_{name}"
+    _shutil.rmtree(work_dir, ignore_errors=True)
+    # Everything but the videos is the masked copy's own (its task strings say "red masked").
+    _shutil.copytree(masked_dir, work_dir, ignore=_shutil.ignore_patterns("videos", ".cache"))
+
+    info = json.loads((clear_dir / "meta" / "info.json").read_text())
+    episodes = episode_offsets(load_episodes(clear_dir), info)
+    files = copied = 0
+    for key in keys:
+        chunk_col, file_col = file_columns(key)
+        fps = info["features"][key]["info"]["video.fps"]
+        for (chunk_idx, file_idx), group in episodes.groupby([chunk_col, file_col]):
+            rel = video_rel_path(info, key, chunk_idx, file_idx)
+            (work_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            hit = flagged & set(group["episode_index"].astype(int))
+            if not hit:
+                _shutil.copy2(masked_dir / rel, work_dir / rel)
+                copied += 1
+                continue
+            print(f"Re-masking {rel}: episodes {sorted(hit)} of {len(group)}")
+            _splice_video_file(clear_dir / rel, masked_dir / rel, work_dir / rel, group, key,
+                               annotations, flagged, fps, report)
+            files += 1
+
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    MASKED_PREV_DIR.mkdir(parents=True, exist_ok=True)
+    masked_dir.rename(MASKED_PREV_DIR / f"{name}-{stamp}")
+    work_dir.rename(masked_dir)
+
+    # Reload before writing: the window may have saved a click while this ran.
+    current = json.loads(Path(annotations_path).read_text())
+    for i in flagged:
+        entry = current["episodes"][str(i)]
+        entry["bad"] = False
+        entry.setdefault("remasked", []).append(stamp)
+    Path(annotations_path).write_text(json.dumps(current, indent=2))
+    print(f"Done -> {masked_dir} ({files} files re-encoded, {copied} copied); "
+          f"previous copy under {MASKED_PREV_DIR / f'{name}-{stamp}'}")
+    return {"remasked": sorted(flagged), "files": files, "copied": copied, "prev": stamp}

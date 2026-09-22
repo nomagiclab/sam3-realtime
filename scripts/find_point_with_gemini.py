@@ -220,6 +220,18 @@ def collect_frames(dataset_dir: Path, info: dict, episodes: pd.DataFrame, middle
     return frames, seeds
 
 
+def seed_frame(annotation: dict, video_key: str) -> int:
+    """The frame this camera's points were placed on.
+
+    One point per camera can mean one instant per camera: the automatic detector puts the
+    overview camera's point on the item while it still lies on the table (frame 0) and the
+    wrist camera's on the item once it is in the gripper, which are not the same moment.
+    A file that names a single `frame` for the whole episode, as hand annotation and Gemini
+    both write, still reads correctly -- `frames` is only consulted when it is there.
+    """
+    return int(annotation.get("frames", {}).get(video_key, annotation["frame"]))
+
+
 def as_points(prompt) -> list:
     """Whatever the json holds for one camera -> [[x, y, label], ...].
 
